@@ -56,6 +56,16 @@ pipeline {
             }
         }
         
+        stage('Generate Checksums') {
+            steps {
+                sh """
+                    sha256sum codeclip-linux-amd64 > codeclip-linux-amd64.sha256
+                    sha256sum codeclip-darwin-amd64 > codeclip-darwin-amd64.sha256
+                    sha256sum codeclip-windows-amd64.exe > codeclip-windows-amd64.exe.sha256
+                """
+            }
+        }
+        
         stage('Archive Artifacts') {
             steps {
                 archiveArtifacts artifacts: 'codeclip-*', allowEmptyArchive: false
