@@ -42,6 +42,7 @@ type HeaderElement struct {
 	ReturnTypes []string        // For functions/methods, return type(s)
 	ValueType   string          // For constants/variables, their type
 	Value       string          // For constants, their assigned value
+	Docstring   string          // Documentation string/comment for the element
 }
 
 // ParameterInfo stores detailed information about a parameter
@@ -533,6 +534,11 @@ func CollectHeaders(path string) ([]HeaderElement, error) {
 					continue
 				}
 
+				// Extract docstrings for supported languages
+				if language == "python" {
+					extractDocstring(&header, lineNum, lines)
+				}
+
 				// For struct and class types, extract fields
 				if header.Type == Struct || header.Type == Class {
 					extractMembers(&header, lineNum, lines)
@@ -846,8 +852,58 @@ func extractField(line string) string {
 	return ""
 }
 
+// extractDocstring finds the docstring for a Python function, class or method
+func extractDocstring(header *HeaderElement, lineNum int, lines []string) {
+	if lineNum >= len(lines) {
+		return
+	}
+
+	// Look for docstrings in the lines following the declaration
+	for i := lineNum; i < len(lines) && i < lineNum+10; i++ { // Look within next 10 lines
+		line := strings.TrimSpace(lines[i])
+
+		// Check for triple-quoted strings (''' or """)
+		if strings.HasPrefix(line, "'''") || strings.HasPrefix(line, "\"\"\"") {
+			quoteType := line[:3]
+
+			// Single line docstring
+			if strings.HasSuffix(line[3:], quoteType) {
+				header.Docstring = line[3 : len(line)-3]
+				return
+			}
+
+			// Multi-line docstring
+			var docBuilder strings.Builder
+			docBuilder.WriteString(line[3:])
+			docBuilder.WriteString("\n")
+
+			// Find the end of the multi-line docstring
+			for j := i + 1; j < len(lines); j++ {
+				if strings.Contains(lines[j], quoteType) {
+					endIndex := strings.Index(lines[j], quoteType)
+					docBuilder.WriteString(lines[j][:endIndex])
+					header.Docstring = strings.TrimSpace(docBuilder.String())
+					return
+				}
+				docBuilder.WriteString(lines[j])
+				docBuilder.WriteString("\n")
+			}
+
+			// If we reach here, the docstring wasn't properly closed
+			// Use what we have so far
+			header.Docstring = strings.TrimSpace(docBuilder.String())
+			return
+		}
+
+		// If we hit non-whitespace, non-docstring line, stop looking
+		if line != "" && !strings.HasPrefix(line, "#") {
+			return
+		}
+	}
+}
+
 // FormatHeaders formats the extracted headers into a readable string
-func FormatHeaders(headers []HeaderElement) string {
+func FormatHeaders(headers []HeaderElement, includeDocstrings bool) string {
 	var builder strings.Builder
 
 	for _, header := range headers {
@@ -962,13 +1018,33 @@ func FormatHeaders(headers []HeaderElement) string {
 				builder.WriteString(fmt.Sprintf("Line %d: %s: %s\n", header.LineNum, header.Type, header.Name))
 			}
 		}
+
+		// Add docstring if requested and available
+		if includeDocstrings && header.Docstring != "" {
+			builder.WriteString(fmt.Sprintf("    Docstring: %s\n", formatMultilineString(header.Docstring)))
+		}
 	}
 
 	return builder.String()
 }
 
+// formatMultilineString formats a multiline string for display, adding indentation
+func formatMultilineString(s string) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) == 1 {
+		return s
+	}
+
+	var builder strings.Builder
+	builder.WriteString("\n")
+	for _, line := range lines {
+		builder.WriteString(fmt.Sprintf("        %s\n", line))
+	}
+	return builder.String()
+}
+
 // CollectHeadersAsString is a convenience function to get formatted headers directly
-func CollectHeadersAsString(path string) (string, error) {
+func CollectHeadersAsString(path string, includeDocstrings bool) (string, error) {
 	headers, err := CollectHeaders(path)
 	if err != nil {
 		return "", err
@@ -978,5 +1054,5 @@ func CollectHeadersAsString(path string) (string, error) {
 		return "No headers found.", nil
 	}
 
-	return FormatHeaders(headers), nil
+	return FormatHeaders(headers, includeDocstrings), nil
 }

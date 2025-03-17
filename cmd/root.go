@@ -5,13 +5,13 @@ import (
 )
 
 var (
-	contextLines    int
-	entireFunction  bool
-	fuzzySearch     bool
-	outputTarget    string
-	estimateTokens  bool
-	maxTokens       int
-	inputPath       string
+	contextLines   int
+	entireFunction bool
+	fuzzySearch    bool
+	outputTarget   string
+	estimateTokens bool
+	maxTokens      int
+	inputPath      string
 )
 
 var rootCmd = &cobra.Command{

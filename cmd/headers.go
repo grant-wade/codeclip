@@ -10,6 +10,9 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Flag to control whether to include docstrings in the output
+var includeDocstrings bool
+
 var headersCmd = &cobra.Command{
 	Use:   "headers [file or glob pattern]",
 	Short: "Extract headers (functions, classes, etc.) from code files",
@@ -20,7 +23,8 @@ based on the programming language of each file.
 Examples:
   codeclip headers main.go
   codeclip headers "**/*.go"
-  codeclip headers --output headers.md "src/**/*.{js,ts}"`,
+  codeclip headers --output headers.md "src/**/*.{js,ts}"
+  codeclip headers --docstrings "**/*.py"`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		pattern := args[0]
@@ -56,7 +60,7 @@ Examples:
 			if len(headers) > 0 {
 				allHeaders.WriteString(fmt.Sprintf("## %s\n\n", filePath))
 				allHeaders.WriteString("```\n")
-				allHeaders.WriteString(finder.FormatHeaders(headers))
+				allHeaders.WriteString(finder.FormatHeaders(headers, includeDocstrings))
 				allHeaders.WriteString("```\n\n")
 			}
 		}
@@ -90,6 +94,6 @@ func fileExists(path string) bool {
 func init() {
 	rootCmd.AddCommand(headersCmd)
 
-	// Add specific flags for this command if needed
-	// For now, we're using the flags already defined in root.go
+	// Add specific flags for this command
+	headersCmd.Flags().BoolVar(&includeDocstrings, "docstrings", false, "Include docstrings in the output for supported languages")
 }
