@@ -37,7 +37,6 @@ func FindFilesByGlob(basePath, pattern string) ([]string, error) {
 		if match && !info.IsDir() {
 			matches = append(matches, path)
 		}
-
 		return nil
 	})
 
