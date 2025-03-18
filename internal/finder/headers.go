@@ -42,6 +42,7 @@ type HeaderElement struct {
 	ReturnTypes []string        // For functions/methods, return type(s)
 	ValueType   string          // For constants/variables, their type
 	Value       string          // For constants, their assigned value
+	Docstring   string          // Documentation string/comment for the element
 }
 
 // ParameterInfo stores detailed information about a parameter
@@ -108,24 +109,36 @@ var languagePatternRegistry = map[string][]LanguagePattern{
 	},
 	"python": {
 		{
-			ElementType: Function,
-			Pattern:     regexp.MustCompile(`^def\s+([A-Za-z0-9_]+)\s*\(`),
-			NameGroup:   1,
+			ElementType:  Function,
+			Pattern:      regexp.MustCompile(`^def\s+([A-Za-z0-9_]+)\s*\((.*?)\)(?:\s*->\s*([A-Za-z0-9_\[\],\s\.]+))?:`),
+			NameGroup:    1,
+			ParamsGroup:  2,
+			ReturnsGroup: 3,
+		},
+		{
+			ElementType:  Method,
+			Pattern:      regexp.MustCompile(`^\s+def\s+([A-Za-z0-9_]+)\s*\((self|cls)(?:,\s*(.*?))?\)(?:\s*->\s*([A-Za-z0-9_\[\],\s\.]+))?:`),
+			NameGroup:    1,
+			ParamsGroup:  3, // Group 3 contains parameters after self/cls
+			ReturnsGroup: 4,
 		},
 		{
 			ElementType: Class,
-			Pattern:     regexp.MustCompile(`^class\s+([A-Za-z0-9_]+)[\(:]`),
+			Pattern:     regexp.MustCompile(`^class\s+([A-Za-z0-9_]+)(?:\((.*?)\))?:`),
 			NameGroup:   1,
+			ParamsGroup: 2, // For parent classes
 		},
 		{
 			ElementType: Import,
-			Pattern:     regexp.MustCompile(`^import\s+([A-Za-z0-9_\.]+)`),
-			NameGroup:   1,
+			Pattern:     regexp.MustCompile(`^(?:from\s+([A-Za-z0-9_\.]+)\s+)?import\s+(.+)`),
+			NameGroup:   2, // Import names
+			ParentGroup: 1, // From module
 		},
 		{
-			ElementType: Variable,
-			Pattern:     regexp.MustCompile(`^([A-Z_][A-Z0-9_]*)\s*=`),
-			NameGroup:   1,
+			ElementType:    Variable,
+			Pattern:        regexp.MustCompile(`^([A-Z_][A-Z0-9_]*)\s*=\s*(.+)`),
+			NameGroup:      1,
+			SignatureGroup: 2, // Value
 		},
 	},
 	"java": {
@@ -332,6 +345,7 @@ func CollectHeaders(path string) ([]HeaderElement, error) {
 	var currentBlock *HeaderElement
 	var inImportBlock bool
 	var braceCount int
+	var currentClass string
 
 	// Reread the file contents for block processing
 	fileContents, err := os.ReadFile(path)
@@ -351,6 +365,15 @@ func CollectHeaders(path string) ([]HeaderElement, error) {
 			strings.HasPrefix(trimmedLine, "#") ||
 			strings.HasPrefix(trimmedLine, "/*") {
 			continue
+		}
+
+		// Track indentation level for Python
+		if language == "python" {
+			leadingSpaces := len(line) - len(strings.TrimLeft(line, " \t"))
+			if leadingSpaces == 0 && trimmedLine != "" {
+				// Reset class context when going back to top level
+				currentClass = ""
+			}
 		}
 
 		// Track braces for block elements
@@ -382,7 +405,7 @@ func CollectHeaders(path string) ([]HeaderElement, error) {
 		// Try each pattern for this language
 		for _, pattern := range patterns {
 			matches := pattern.Pattern.FindStringSubmatch(trimmedLine)
-			if len(matches) > pattern.NameGroup {
+			if len(matches) > pattern.NameGroup && pattern.NameGroup > 0 {
 				header := HeaderElement{
 					Type:    pattern.ElementType,
 					Name:    matches[pattern.NameGroup],
@@ -407,6 +430,11 @@ func CollectHeaders(path string) ([]HeaderElement, error) {
 					header.Parent = matches[pattern.ParentGroup]
 				}
 
+				// For Python methods, set the current class as parent if not specified
+				if language == "python" && pattern.ElementType == Method && header.Parent == "" && currentClass != "" {
+					header.Parent = currentClass
+				}
+
 				// Add parameters if available
 				if pattern.ParamsGroup > 0 && len(matches) > pattern.ParamsGroup {
 					params := parseParametersWithTypes(matches[pattern.ParamsGroup], language)
@@ -417,6 +445,72 @@ func CollectHeaders(path string) ([]HeaderElement, error) {
 				if pattern.ReturnsGroup > 0 && len(matches) > pattern.ReturnsGroup {
 					returns := parseReturnTypes(matches[pattern.ReturnsGroup], language)
 					header.ReturnTypes = returns
+				}
+
+				// Track current class for Python
+				if language == "python" && pattern.ElementType == Class {
+					currentClass = header.Name
+				}
+
+				// Handle Python imports specifically
+				if language == "python" && pattern.ElementType == Import {
+					// Special handling for Python imports
+					if header.Parent != "" { // "from X import Y" case
+						moduleFrom := header.Parent
+						importItems := strings.Split(header.Name, ",")
+
+						for _, item := range importItems {
+							item = strings.TrimSpace(item)
+							if item == "*" {
+								header.Children = append(header.Children, HeaderElement{
+									Type:    Import,
+									Name:    "*",
+									Parent:  moduleFrom,
+									LineNum: lineNum,
+								})
+							} else if strings.Contains(item, " as ") {
+								parts := strings.Split(item, " as ")
+								origName := strings.TrimSpace(parts[0])
+								aliasName := strings.TrimSpace(parts[1])
+								header.Children = append(header.Children, HeaderElement{
+									Type:      Import,
+									Name:      origName,
+									Parent:    moduleFrom,
+									Signature: aliasName, // Use Signature to store alias
+									LineNum:   lineNum,
+								})
+							} else if item != "" {
+								header.Children = append(header.Children, HeaderElement{
+									Type:    Import,
+									Name:    item,
+									Parent:  moduleFrom,
+									LineNum: lineNum,
+								})
+							}
+						}
+					} else { // Direct "import X" case
+						importItems := strings.Split(header.Name, ",")
+						for _, item := range importItems {
+							item = strings.TrimSpace(item)
+							if strings.Contains(item, " as ") {
+								parts := strings.Split(item, " as ")
+								origName := strings.TrimSpace(parts[0])
+								aliasName := strings.TrimSpace(parts[1])
+								header.Children = append(header.Children, HeaderElement{
+									Type:      Import,
+									Name:      origName,
+									Signature: aliasName, // Use Signature to store alias
+									LineNum:   lineNum,
+								})
+							} else if item != "" {
+								header.Children = append(header.Children, HeaderElement{
+									Type:    Import,
+									Name:    item,
+									LineNum: lineNum,
+								})
+							}
+						}
+					}
 				}
 
 				// Handle constants and variables with type and value info
@@ -438,6 +532,11 @@ func CollectHeaders(path string) ([]HeaderElement, error) {
 					inImportBlock = true
 					currentBlock = &header
 					continue
+				}
+
+				// Extract docstrings for supported languages
+				if language == "python" {
+					extractDocstring(&header, lineNum, lines)
 				}
 
 				// For struct and class types, extract fields
@@ -509,6 +608,54 @@ func parseParametersWithTypes(paramStr string, language string) []ParameterInfo 
 				params = append(params, ParameterInfo{
 					Name: "",
 					Type: parts[0],
+				})
+			}
+		}
+		return params
+
+	case "python":
+		// Handle Python parameter syntax including type hints
+		var params []ParameterInfo
+		paramGroups := splitParamsRespectingBrackets(paramStr)
+
+		for _, group := range paramGroups {
+			group = strings.TrimSpace(group)
+			if group == "" {
+				continue
+			}
+
+			// Check for type annotations (param: type)
+			if strings.Contains(group, ":") {
+				parts := strings.SplitN(group, ":", 2)
+				paramName := strings.TrimSpace(parts[0])
+				paramType := ""
+				if len(parts) > 1 {
+					paramType = strings.TrimSpace(parts[1])
+				}
+
+				// Handle default values
+				if strings.Contains(paramName, "=") {
+					nameParts := strings.SplitN(paramName, "=", 2)
+					paramName = strings.TrimSpace(nameParts[0])
+				}
+
+				params = append(params, ParameterInfo{
+					Name: paramName,
+					Type: paramType,
+				})
+			} else {
+				// Parameter without type annotation
+				paramName := group
+
+				// Handle default values
+				if strings.Contains(paramName, "=") {
+					nameParts := strings.SplitN(paramName, "=", 2)
+					paramName = strings.TrimSpace(nameParts[0])
+				}
+
+				params = append(params, ParameterInfo{
+					Name: paramName,
+					Type: "",
 				})
 			}
 		}
@@ -705,8 +852,58 @@ func extractField(line string) string {
 	return ""
 }
 
+// extractDocstring finds the docstring for a Python function, class or method
+func extractDocstring(header *HeaderElement, lineNum int, lines []string) {
+	if lineNum >= len(lines) {
+		return
+	}
+
+	// Look for docstrings in the lines following the declaration
+	for i := lineNum; i < len(lines) && i < lineNum+10; i++ { // Look within next 10 lines
+		line := strings.TrimSpace(lines[i])
+
+		// Check for triple-quoted strings (''' or """)
+		if strings.HasPrefix(line, "'''") || strings.HasPrefix(line, "\"\"\"") {
+			quoteType := line[:3]
+
+			// Single line docstring
+			if strings.HasSuffix(line[3:], quoteType) {
+				header.Docstring = line[3 : len(line)-3]
+				return
+			}
+
+			// Multi-line docstring
+			var docBuilder strings.Builder
+			docBuilder.WriteString(line[3:])
+			docBuilder.WriteString("\n")
+
+			// Find the end of the multi-line docstring
+			for j := i + 1; j < len(lines); j++ {
+				if strings.Contains(lines[j], quoteType) {
+					endIndex := strings.Index(lines[j], quoteType)
+					docBuilder.WriteString(lines[j][:endIndex])
+					header.Docstring = strings.TrimSpace(docBuilder.String())
+					return
+				}
+				docBuilder.WriteString(lines[j])
+				docBuilder.WriteString("\n")
+			}
+
+			// If we reach here, the docstring wasn't properly closed
+			// Use what we have so far
+			header.Docstring = strings.TrimSpace(docBuilder.String())
+			return
+		}
+
+		// If we hit non-whitespace, non-docstring line, stop looking
+		if line != "" && !strings.HasPrefix(line, "#") {
+			return
+		}
+	}
+}
+
 // FormatHeaders formats the extracted headers into a readable string
-func FormatHeaders(headers []HeaderElement) string {
+func FormatHeaders(headers []HeaderElement, includeDocstrings bool) string {
 	var builder strings.Builder
 
 	for _, header := range headers {
@@ -780,9 +977,28 @@ func FormatHeaders(headers []HeaderElement) string {
 			}
 
 		case Import:
-			builder.WriteString(fmt.Sprintf("Line %d: %s: \n", header.LineNum, header.Type))
-			for _, child := range header.Children {
-				builder.WriteString(fmt.Sprintf("    %s\n", child.Name))
+			builder.WriteString(fmt.Sprintf("Line %d: %s:\n", header.LineNum, header.Type))
+			if len(header.Children) > 0 {
+				for _, child := range header.Children {
+					if child.Parent != "" {
+						if child.Signature != "" {
+							builder.WriteString(fmt.Sprintf("    from %s import %s as %s\n",
+								child.Parent, child.Name, child.Signature))
+						} else {
+							builder.WriteString(fmt.Sprintf("    from %s import %s\n",
+								child.Parent, child.Name))
+						}
+					} else {
+						if child.Signature != "" {
+							builder.WriteString(fmt.Sprintf("    import %s as %s\n",
+								child.Name, child.Signature))
+						} else {
+							builder.WriteString(fmt.Sprintf("    import %s\n", child.Name))
+						}
+					}
+				}
+			} else {
+				builder.WriteString(fmt.Sprintf("    %s\n", header.Name))
 			}
 
 		case Struct, Class:
@@ -802,13 +1018,33 @@ func FormatHeaders(headers []HeaderElement) string {
 				builder.WriteString(fmt.Sprintf("Line %d: %s: %s\n", header.LineNum, header.Type, header.Name))
 			}
 		}
+
+		// Add docstring if requested and available
+		if includeDocstrings && header.Docstring != "" {
+			builder.WriteString(fmt.Sprintf("    Docstring: %s\n", formatMultilineString(header.Docstring)))
+		}
 	}
 
 	return builder.String()
 }
 
+// formatMultilineString formats a multiline string for display, adding indentation
+func formatMultilineString(s string) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) == 1 {
+		return s
+	}
+
+	var builder strings.Builder
+	builder.WriteString("\n")
+	for _, line := range lines {
+		builder.WriteString(fmt.Sprintf("        %s\n", line))
+	}
+	return builder.String()
+}
+
 // CollectHeadersAsString is a convenience function to get formatted headers directly
-func CollectHeadersAsString(path string) (string, error) {
+func CollectHeadersAsString(path string, includeDocstrings bool) (string, error) {
 	headers, err := CollectHeaders(path)
 	if err != nil {
 		return "", err
@@ -818,5 +1054,5 @@ func CollectHeadersAsString(path string) (string, error) {
 		return "No headers found.", nil
 	}
 
-	return FormatHeaders(headers), nil
+	return FormatHeaders(headers, includeDocstrings), nil
 }
